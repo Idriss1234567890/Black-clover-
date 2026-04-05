@@ -7,10 +7,9 @@ app.use(express.json());
 const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 
-// تخزين حالة المستخدم
+// تخزين الحالة (اسم + offset + الصور)
 let userState = {};
 
-// delay لتفادي حظر فيسبوك
 const delay = (ms) => new Promise(res => setTimeout(res, ms));
 
 // الصفحة الرئيسية
@@ -39,29 +38,39 @@ app.post("/webhook", async (req, res) => {
         if (event.message && event.message.text) {
           let text = event.message.text.trim().toLowerCase();
 
-          // رجوع
+          // 🔁 list
           if (text === "list") {
             userState[sender] = null;
             await sendText(sender, "📌 أرسل اسم أنمي (مثال: one piece)");
             continue;
           }
 
-          // مزيد
+          // 👑 القائمة
+          if (text === "القائمة") {
+            await sendText(sender, "👑 مطوّر البوت:\nhttps://www.facebook.com/idriss.wle");
+            continue;
+          }
+
+          // ➕ مزيد (صورة واحدة فقط)
           if (text === "مزيد") {
             if (!userState[sender]) {
               await sendText(sender, "❗ أرسل اسم أنمي أولاً");
               continue;
             }
 
-            await sendAnimeImage(sender, userState[sender]);
+            await sendNextImage(sender);
             continue;
           }
 
-          // بحث جديد
-          userState[sender] = text.replace(/\s+/g, "");
+          // 🔍 بحث جديد
+          userState[sender] = {
+            query: text,
+            offset: 0,
+            images: []
+          };
 
           await sendText(sender, `🔍 جاري البحث عن ${text}...`);
-          await sendAnimeImage(sender, userState[sender]);
+          await sendNextImage(sender);
         }
       }
     }
@@ -73,23 +82,37 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-// 🔥 جلب صورة حسب الأنمي
-async function sendAnimeImage(userId, category) {
+// 🔥 إرسال صورة واحدة فقط
+async function sendNextImage(userId) {
   try {
-    const url = `https://animepixels-api.vercel.app/api/media/random/image?category=${category}`;
+    let state = userState[userId];
 
-    const res = await axios.get(url);
+    // إذا ما كاين صور في الكاش → جيب دفعة جديدة
+    if (!state.images || state.images.length === 0) {
+      const url = `https://animepixels-api.vercel.app/api/media/search/image?q=${encodeURIComponent(state.query)}&limit=5&offset=${state.offset}`;
 
-    if (!res.data || !res.data.url) {
-      return sendText(userId, "❌ لا توجد صور لهذا الأنمي");
+      const response = await axios.get(url);
+
+      if (!response.data || !response.data.results || response.data.results.length === 0) {
+        return sendText(userId, "❌ لا توجد صور أخرى");
+      }
+
+      state.images = response.data.results;
+      state.offset += 5;
     }
 
-    await sendImage(userId, res.data.url);
-    await delay(500); // مهم جداً
+    // خذ صورة وحدة فقط
+    const img = state.images.shift();
+
+    if (img && img.url) {
+      await sendImage(userId, img.url);
+      await delay(300);
+      await sendText(userId, "📩 أرسل (مزيد) لصورة أخرى");
+    }
 
   } catch (err) {
     console.log("IMAGE ERROR:", err.response?.data || err.message);
-    await sendText(userId, "⚠️ لم يتم العثور على صور لهذا الأنمي");
+    await sendText(userId, "⚠️ خطأ أثناء جلب الصور");
   }
 }
 
