@@ -1,120 +1,131 @@
-const express = require('express');
-const bodyParser = require('body-parser');
-const axios = require('axios');
+const express = require("express");
+const axios = require("axios");
 
 const app = express();
-app.use(bodyParser.json());
+app.use(express.json());
 
-// المتغيرات المطلوبة (ضع قيمك هنا أو في Vercel Env)
 const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
-const VERIFY_TOKEN = process.env.VERIFY_TOKEN || 'my_secret_token';
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 
-// ذاكرة مؤقتة لتخزين رقم الصفحة لكل مستخدم (تختفي عند إعادة تشغيل السيرفر)
+// تخزين حالة المستخدم
 let userState = {};
 
-// مسار التحقق من الـ Webhook لفيسبوك
-app.get('/', (req, res) => {
-    let mode = req.query['hub.mode'];
-    let token = req.query['hub.verify_token'];
-    let challenge = req.query['hub.challenge'];
+// delay لتفادي حظر فيسبوك
+const delay = (ms) => new Promise(res => setTimeout(res, ms));
 
-    if (mode && token === VERIFY_TOKEN) {
-        res.status(200).send(challenge);
-    } else {
-        res.sendStatus(403);
-    }
+// الصفحة الرئيسية
+app.get("/", (req, res) => {
+  res.send("Bot is running ✅");
+});
+
+// التحقق
+app.get("/webhook", (req, res) => {
+  if (req.query["hub.verify_token"] === VERIFY_TOKEN) {
+    return res.send(req.query["hub.challenge"]);
+  }
+  res.send("Error");
 });
 
 // استقبال الرسائل
-app.post('/', (req, res) => {
-    let body = req.body;
+app.post("/webhook", async (req, res) => {
+  try {
+    const body = req.body;
 
-    if (body.object === 'page') {
-        body.entry.forEach(entry => {
-            let webhook_event = entry.messaging[0];
-            let sender_psid = webhook_event.sender.id;
+    if (body.object === "page") {
+      for (const entry of body.entry) {
+        const event = entry.messaging[0];
+        const sender = event.sender.id;
 
-            if (webhook_event.message && webhook_event.message.text) {
-                handleMessage(sender_psid, webhook_event.message.text.trim());
+        if (event.message && event.message.text) {
+          let text = event.message.text.trim().toLowerCase();
+
+          // رجوع
+          if (text === "list") {
+            userState[sender] = null;
+            await sendText(sender, "📌 أرسل اسم أنمي (مثال: one piece)");
+            continue;
+          }
+
+          // مزيد
+          if (text === "مزيد") {
+            if (!userState[sender]) {
+              await sendText(sender, "❗ أرسل اسم أنمي أولاً");
+              continue;
             }
-        });
-        res.status(200).send('EVENT_RECEIVED');
-    } else {
-        res.sendStatus(404);
+
+            await sendAnimeImage(sender, userState[sender]);
+            continue;
+          }
+
+          // بحث جديد
+          userState[sender] = text.replace(/\s+/g, "");
+
+          await sendText(sender, `🔍 جاري البحث عن ${text}...`);
+          await sendAnimeImage(sender, userState[sender]);
+        }
+      }
     }
+
+    res.sendStatus(200);
+  } catch (err) {
+    console.log("MAIN ERROR:", err);
+    res.sendStatus(200);
+  }
 });
 
-async function handleMessage(psid, text) {
-    const query = text.toLowerCase();
+// 🔥 جلب صورة حسب الأنمي
+async function sendAnimeImage(userId, category) {
+  try {
+    const url = `https://animepixels-api.vercel.app/api/media/random/image?category=${category}`;
 
-    // 1. أمر العودة للقائمة الرئيسية
-    if (query === 'list') {
-        userState[psid] = { query: '', page: 1 };
-        return sendTextMessage(psid, "🏠 القائمة الرئيسية:\nأرسل اسم الأنمي للبحث عن خلفيات (مثلاً: One Piece).");
+    const res = await axios.get(url);
+
+    if (!res.data || !res.data.url) {
+      return sendText(userId, "❌ لا توجد صور لهذا الأنمي");
     }
 
-    // 2. أمر المزيد
-    if (query === 'مزيد' || query === 'more') {
-        if (!userState[psid] || !userState[psid].query) {
-            return sendTextMessage(psid, "يرجى كتابة اسم الأنمي أولاً قبل طلب المزيد.");
-        }
-        userState[psid].page += 1;
-        return fetchAndSend(psid, userState[psid].query, userState[psid].page);
-    }
+    await sendImage(userId, res.data.url);
+    await delay(500); // مهم جداً
 
-    // 3. بحث جديد
-    userState[psid] = { query: text, page: 1 };
-    fetchAndSend(psid, text, 1);
+  } catch (err) {
+    console.log("IMAGE ERROR:", err.response?.data || err.message);
+    await sendText(userId, "⚠️ لم يتم العثور على صور لهذا الأنمي");
+  }
 }
 
-async function fetchAndSend(psid, query, page) {
-    try {
-        await sendTextMessage(psid, `🔍 جاري البحث عن ${query} (صفحة ${page})...`);
-        
-        // استبدل هذا الرابط بـ Endpoint الخاص بـ AnimePixels API الفعلي
-        const response = await axios.get(`https://api.animepixels.net/v1/search`, {
-            params: { q: query, page: page }
-        });
-
-        const results = response.data.results || [];
-        const topFive = results.slice(0, 5);
-
-        if (topFive.length === 0) {
-            return sendTextMessage(psid, "❌ لم يتم العثور على نتائج.");
-        }
-
-        // إرسال الصور
-        for (let item of topFive) {
-            await sendAttachment(psid, 'image', item.url);
-        }
-
-        await sendTextMessage(psid, "✅ أرسل 'مزيد' للحصول على صور أخرى، أو 'list' للبحث من جديد.");
-
-    } catch (error) {
-        console.error(error);
-        sendTextMessage(psid, "⚠️ حدث خطأ أثناء جلب البيانات من API.");
-    }
+// إرسال نص
+async function sendText(userId, text) {
+  try {
+    await axios.post(
+      `https://graph.facebook.com/v18.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`,
+      {
+        recipient: { id: userId },
+        message: { text }
+      }
+    );
+  } catch (err) {
+    console.log("TEXT ERROR:", err.response?.data || err.message);
+  }
 }
 
-// وظائف إرسال لـ Facebook API
-async function sendTextMessage(psid, text) {
-    await axios.post(`https://graph.facebook.com/v18.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`, {
-        recipient: { id: psid },
-        message: { text: text }
-    });
-}
-
-async function sendAttachment(psid, type, url) {
-    await axios.post(`https://graph.facebook.com/v18.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`, {
-        recipient: { id: psid },
+// إرسال صورة
+async function sendImage(userId, url) {
+  try {
+    await axios.post(
+      `https://graph.facebook.com/v18.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`,
+      {
+        recipient: { id: userId },
         message: {
-            attachment: {
-                type: type,
-                payload: { url: url, is_selectable: true }
-            }
+          attachment: {
+            type: "image",
+            payload: { url }
+          }
         }
-    });
+      }
+    );
+  } catch (err) {
+    console.log("IMAGE SEND ERROR:", err.response?.data || err.message);
+  }
 }
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server is running on port ${PORT}`));
+module.exports = app;
